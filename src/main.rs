@@ -2,80 +2,84 @@ use std::{
     collections::HashMap,
     io::{Read, Write},
     net::TcpListener,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:6379")?;
-    let mut hashmap = HashMap::new();
+    let store = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
         let (mut stream, _) = listener.accept()?;
+        let store = Arc::clone(&store);
 
-        loop {
-            let mut buf = [0u8; 512];
-            let n = stream.read(&mut buf)?;
+        std::thread::spawn(move || -> std::io::Result<()> {
+            loop {
+                let mut buf = [0u8; 512];
+                let n = stream.read(&mut buf)?;
 
-            if n == 0 {
-                break;
-            }
+                if n == 0 {
+                    break Ok(());
+                }
 
-            let mut pos = 0;
+                let mut pos = 0;
 
-            if buf[pos] == b'*' {
-                pos += 1;
-            }
-
-            let number_of_elements = find_number(&buf, &mut pos);
-
-            let mut results = Vec::new();
-            for _ in 0..number_of_elements {
-                if buf[pos] == b'$' {
+                if buf[pos] == b'*' {
                     pos += 1;
                 }
-                let len = find_number(&buf, &mut pos);
-                results.push(buf[pos..pos + len].to_vec());
-                pos += len + 2;
-            }
 
-            let command = parse_command(results);
+                let number_of_elements = find_number(&buf, &mut pos);
 
-            match command {
-                Command::Ping => {
-                    stream.write_all(b"+PONG\r\n")?;
+                let mut results = Vec::new();
+                for _ in 0..number_of_elements {
+                    if buf[pos] == b'$' {
+                        pos += 1;
+                    }
+                    let len = find_number(&buf, &mut pos);
+                    results.push(buf[pos..pos + len].to_vec());
+                    pos += len + 2;
                 }
-                Command::Set {
-                    key,
-                    value,
-                    expires_at,
-                } => {
-                    hashmap.insert(key, (value, expires_at));
-                    stream.write_all(b"+OK\r\n")?;
-                }
-                Command::Get { key } => match hashmap.get(&key) {
-                    Some(v) => {
-                        let expired = match v.1 {
-                            Some(expires_at) => expires_at < Instant::now(),
-                            None => false,
-                        };
-                        if expired {
-                            stream.write_all(b"$-1\r\n")?;
-                        } else {
-                            let mut response = Vec::new();
-                            response.push(b'$');
-                            response.extend_from_slice(v.0.len().to_string().as_bytes());
-                            response.extend_from_slice(b"\r\n");
-                            response.extend_from_slice(&v.0);
-                            response.extend_from_slice(b"\r\n");
-                            stream.write_all(&response)?;
+
+                let command = parse_command(results);
+
+                match command {
+                    Command::Ping => {
+                        stream.write_all(b"+PONG\r\n")?;
+                    }
+                    Command::Set {
+                        key,
+                        value,
+                        expires_at,
+                    } => {
+                        store.lock().unwrap().insert(key, (value, expires_at));
+                        stream.write_all(b"+OK\r\n")?;
+                    }
+                    Command::Get { key } => match store.lock().unwrap().get(&key) {
+                        Some(v) => {
+                            let expired = match v.1 {
+                                Some(expires_at) => expires_at < Instant::now(),
+                                None => false,
+                            };
+                            if expired {
+                                stream.write_all(b"$-1\r\n")?;
+                            } else {
+                                let mut response = Vec::new();
+                                response.push(b'$');
+                                response.extend_from_slice(v.0.len().to_string().as_bytes());
+                                response.extend_from_slice(b"\r\n");
+                                response.extend_from_slice(&v.0);
+                                response.extend_from_slice(b"\r\n");
+                                stream.write_all(&response)?;
+                            }
                         }
-                    }
-                    None => {
-                        stream.write_all(b"$-1\r\n")?;
-                    }
-                },
+                        None => {
+                            stream.write_all(b"$-1\r\n")?;
+                        }
+                    },
+                }
             }
-        }
+        });
     }
 }
 
