@@ -1,4 +1,4 @@
-# Phase4: Concurrency (std::thread)
+# Phase4a: Concurrency (std::thread)
 
 ## Goal
 Multiple `redis-cli` clients can connect simultaneously and independently execute `SET` / `GET` / `PING`.

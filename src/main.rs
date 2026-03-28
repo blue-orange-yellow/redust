@@ -1,26 +1,27 @@
 use std::{
     collections::HashMap,
-    io::{Read, Write},
-    net::TcpListener,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
-fn main() -> std::io::Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:6379")?;
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:6379").await?;
     let store = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
-        let (mut stream, _) = listener.accept()?;
+        let (mut stream, _) = listener.accept().await?;
         let store = Arc::clone(&store);
 
-        std::thread::spawn(move || -> std::io::Result<()> {
+        tokio::spawn(async move {
             loop {
                 let mut buf = [0u8; 512];
-                let n = stream.read(&mut buf)?;
+                let n = stream.read(&mut buf).await?;
 
                 if n == 0 {
-                    break Ok(());
+                    break Ok::<(), std::io::Error>(());
                 }
 
                 let mut pos = 0;
@@ -45,7 +46,7 @@ fn main() -> std::io::Result<()> {
 
                 match command {
                     Command::Ping => {
-                        stream.write_all(b"+PONG\r\n")?;
+                        stream.write_all(b"+PONG\r\n").await?;
                     }
                     Command::Set {
                         key,
@@ -53,30 +54,33 @@ fn main() -> std::io::Result<()> {
                         expires_at,
                     } => {
                         store.lock().unwrap().insert(key, (value, expires_at));
-                        stream.write_all(b"+OK\r\n")?;
+                        stream.write_all(b"+OK\r\n").await?;
                     }
-                    Command::Get { key } => match store.lock().unwrap().get(&key) {
-                        Some(v) => {
-                            let expired = match v.1 {
-                                Some(expires_at) => expires_at < Instant::now(),
-                                None => false,
-                            };
-                            if expired {
-                                stream.write_all(b"$-1\r\n")?;
-                            } else {
-                                let mut response = Vec::new();
-                                response.push(b'$');
-                                response.extend_from_slice(v.0.len().to_string().as_bytes());
-                                response.extend_from_slice(b"\r\n");
-                                response.extend_from_slice(&v.0);
-                                response.extend_from_slice(b"\r\n");
-                                stream.write_all(&response)?;
+                    Command::Get { key } => {
+                        let entry = store.lock().unwrap().get(&key).cloned();
+                        match entry {
+                            Some(v) => {
+                                let expired = match v.1 {
+                                    Some(expires_at) => expires_at < Instant::now(),
+                                    None => false,
+                                };
+                                if expired {
+                                    stream.write_all(b"$-1\r\n").await?;
+                                } else {
+                                    let mut response = Vec::new();
+                                    response.push(b'$');
+                                    response.extend_from_slice(v.0.len().to_string().as_bytes());
+                                    response.extend_from_slice(b"\r\n");
+                                    response.extend_from_slice(&v.0);
+                                    response.extend_from_slice(b"\r\n");
+                                    stream.write_all(&response).await?;
+                                }
+                            }
+                            None => {
+                                stream.write_all(b"$-1\r\n").await?;
                             }
                         }
-                        None => {
-                            stream.write_all(b"$-1\r\n")?;
-                        }
-                    },
+                    }
                 }
             }
         });
