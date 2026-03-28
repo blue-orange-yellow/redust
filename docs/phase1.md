@@ -42,3 +42,4 @@ cargo run
 # Terminal 2
 redis-cli PING
 # -> P0NG means done
+```
